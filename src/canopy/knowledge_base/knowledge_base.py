@@ -1,9 +1,7 @@
 import os
 from copy import deepcopy
-from datetime import datetime
 import time
 from typing import List, Optional, Dict, Any
-import pandas as pd
 from pinecone import list_indexes, delete_index, create_index, init \
     as pinecone_init, whoami as pinecone_whoami
 from pinecone import ApiException as PineconeApiException
@@ -13,9 +11,6 @@ try:
 except ImportError:
     from pinecone import Index
 
-from pinecone_datasets import Dataset
-from pinecone_datasets import DenseModelMetadata, DatasetMetadata
-
 from canopy.knowledge_base.base import BaseKnowledgeBase
 from canopy.knowledge_base.chunker import Chunker, MarkdownChunker
 from canopy.knowledge_base.record_encoder import (RecordEncoder,
@@ -24,7 +19,6 @@ from canopy.knowledge_base.models import (KBQueryResult, KBQuery, QueryResult,
                                           KBDocChunkWithScore, DocumentWithScore)
 from canopy.knowledge_base.reranker import Reranker, TransparentReranker
 from canopy.models.data_models import Query, Document
-
 
 INDEX_NAME_PREFIX = "canopy--"
 TIMEOUT_INDEX_CREATE = 300
@@ -69,7 +63,6 @@ def list_canopy_indexes() -> List[str]:
 
 
 class KnowledgeBase(BaseKnowledgeBase):
-
     """
     The `KnowledgeBase` is used to store and retrieve text documents, using an underlying Pinecone index.
     Every document is chunked into multiple text snippets based on the text structure (e.g. Markdown or HTML formatting)
@@ -486,96 +479,6 @@ class KnowledgeBase(BaseKnowledgeBase):
                                     metadata=metadata)
             )
         return KBQueryResult(query=query.text, documents=documents)
-
-    def upsert(self,
-               documents: List[Document],
-               namespace: str = "",
-               batch_size: int = 200,
-               show_progress_bar: bool = False):
-        """
-        Upsert documents into the knowledge base.
-        Upsert operation stands for "update or insert".
-        It means that if a document with the same id already exists in the index, it will be updated with the new document.
-        Otherwise, a new document will be inserted.
-
-        This operation includes several steps:
-        1. Split the documents into smaller chunks.
-        2. Encode the chunks to vectors.
-        3. Delete any existing chunks belonging to the same documents.
-        4. Upsert the chunks to the index.
-
-        Args:
-            documents: A list of documents to upsert.
-            namespace: The namespace in the underlying index to upsert documents into.
-            batch_size: Refers only to the actual upsert operation to the underlying index.
-                        The number of chunks (multiple piecies of text per document) to upsert in each batch.
-                        Defaults to 100.
-            show_progress_bar: Whether to show a progress bar while upserting the documents.
-
-
-        Example:
-            >>> from canopy.knowledge_base.knowledge_base import KnowledgeBase
-            >>> from tokenizer import Tokenizer
-            >>> Tokenizer.initialize()
-            >>> kb = KnowledgeBase(index_name="my_index")
-            >>> kb.connect()
-            >>> documents = [Document(id="doc1",
-                                        text="This is a document",
-                                        source="my_source",
-                                        metadata={"website": "wiki"}),
-                            Document(id="doc2",
-                                     text="This is another document",
-                                     source="my_source",
-                                     metadata={"website": "wiki"})]
-            >>> kb.upsert(documents)
-        """  # noqa: E501
-        if self._index is None:
-            raise RuntimeError(self._connection_error_msg)
-
-        for doc in documents:
-            metadata_keys = set(doc.metadata.keys())
-            forbidden_keys = metadata_keys.intersection(RESERVED_METADATA_KEYS)
-            if forbidden_keys:
-                raise ValueError(
-                    f"Document with id {doc.id} contains reserved metadata keys: "
-                    f"{forbidden_keys}. Please remove them and try again."
-                )
-
-        chunks = self._chunker.chunk_documents(documents)
-        encoded_chunks = self._encoder.encode_documents(chunks)
-
-        encoder_name = self._encoder.__class__.__name__
-
-        dataset_metadata = DatasetMetadata(name=self._index_name,
-                                           created_at=str(datetime.now()),
-                                           documents=len(chunks),
-                                           dense_model=DenseModelMetadata(
-                                               name=encoder_name,
-                                               dimension=self._encoder.dimension),
-                                           queries=0)
-
-        dataset = Dataset.from_pandas(
-            pd.DataFrame.from_records([c.to_db_record() for c in encoded_chunks]),
-            metadata=dataset_metadata
-        )
-
-        # The upsert operation may update documents which may already exist
-        # int the index, as many individual chunks.
-        # As the process of chunking might have changed
-        # the number of chunks per document,
-        # we need to delete all existing chunks
-        # belonging to the same documents before upserting the new ones.
-        # we currently don't delete documents before upsert in starter env
-        if not self._is_starter_env():
-            self.delete(document_ids=[doc.id for doc in documents],
-                        namespace=namespace)
-
-        # Upsert to Pinecone index
-        dataset.to_pinecone_index(self._index_name,
-                                  namespace=namespace,
-                                  should_create_index=False,
-                                  batch_size=batch_size,
-                                  show_progress=show_progress_bar)
 
     def delete(self,
                document_ids: List[str],
